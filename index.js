@@ -1,122 +1,161 @@
 const TelegramBot = require("node-telegram-bot-api");
 const axios = require("axios");
 const schedule = require('node-schedule');
+const mongoose = require('mongoose');
+require('dotenv').config();
 
-const TOKEN = "";
-const weather_Token = "";
+const TOKEN = process.env.TELEGRAM_BOT_TOKEN;
+const weather_Token = process.env.WEATHER_API_TOKEN;
 
-const bot = new TelegramBot(TOKEN, {polling:true});
+mongoose.connect(process.env.MONGODB_CONNECTION_STRING);
 
-// Schedule a job to run every 8am
-const everySixHoursJob = schedule.scheduleJob('* 8 * * *', () => {
-    console.log('Job executed daily 8am at', new Date());
+const bot = new TelegramBot(TOKEN, { polling: true });
+const UserModel = require('./models/userModel');
+
+async function createUser(chatId, firstName, userName) {
+    await UserModel.create({
+        chatId,
+        userName,
+        firstName,
+    });
+}
+
+// Schedule a job to run every 8 am
+const dailyJob = schedule.scheduleJob('0 8 * * *', () => {
+    console.log('Job executed daily at 8 am', new Date());
+    sendWeatherUpdatesToAll();
 });
 
-function getUpdates(chatId){
-    let city = "pune" // get form db by chatId
-    let params = {
-        access_key: weather_Token,
-        query: userInput
+async function sendWeatherUpdatesToAll() {
+    const users = await UserModel.find();
+
+    users.forEach(async (user) => {
+        const chatId = user.chatId; // if users is blocked it will remind him/her of same
+        if (await isSubscribed(chatId)) {
+            getWeatherUpdates(chatId);
         }
-    
-    axios.get('http://api.weatherstack.com/current', {params})
-    .then(response => {
+    });
+}
+
+// Check if user is blocked by admin
+async function isBlocked(chatId) {
+    const user = await UserModel.findOne({ chatId });
+    if (user && user.isBlocked) {
+        bot.sendMessage(chatId, "You are blocked by the admin. Please contact for help.");
+        return true;
+    }
+    return false;
+}
+
+// Check if user is subscribed
+async function isSubscribed(chatId) {
+    if (await isBlocked(chatId)) {
+        return false;
+    }
+
+    const user = await UserModel.findOne({ chatId });
+    return user !== null;
+}
+
+// Get weather updates
+async function getWeatherUpdates(chatId) {
+    const user = await UserModel.findOne({ chatId });
+    const city = user.city; // Retrieve from the database using chatId
+    const params = {
+        access_key: weather_Token,
+        query: city,
+    };
+
+    try {
+        const response = await axios.get('http://api.weatherstack.com/current', { params });
         const apiResponse = response.data;
-        const city = apiResponse.location.name + ", " + apiResponse.location.country;
+
+        const cityInfo = `${apiResponse.location.name}, ${apiResponse.location.country}`;
         const temperature = apiResponse.current.temperature;
         const humidity = apiResponse.current.humidity;
         const pressure = apiResponse.current.pressure;
         const visibility = apiResponse.current.visibility;
-        const weather_descriptions = apiResponse.current.weather_descriptions;
+        const weatherDescriptions = apiResponse.current.weather_descriptions;
 
         const returnMessage = `Weather Report:
-        city name: ${city}
-        weather_descriptions: ${weather_descriptions}
-        temperature: ${temperature}°C
-        humidity: ${humidity}%
-        pressure: ${pressure}hPa
-        visibility: ${visibility}km`;
+            City: ${cityInfo}
+            Weather Descriptions: ${weatherDescriptions}
+            Temperature: ${temperature}°C
+            Humidity: ${humidity}%
+            Pressure: ${pressure}hPa
+            Visibility: ${visibility}km`;
 
         bot.sendMessage(chatId, returnMessage);
-    }).catch(error => {
+    } catch (error) {
         bot.sendMessage(chatId, "No such city exists");
-        console.log(error);
-    });
+        console.error(error.message);
+    }
 }
 
+async function updateUserCity(chatId, newCity) {
+    if (!await isSubscribed(chatId)) {
+        bot.sendMessage(chatId, "Please subscribe first");
+    } else {
+        await UserModel.updateOne({ chatId }, { $set: { city: newCity } });
+        bot.sendMessage(chatId, `Your city has been updated to ${newCity}`);
+    }
+}
+
+// Handle /start command
 bot.onText(/\/start/, (msg) => {
     const chatId = msg.chat.id;
-    const welcomeMessage = 'Welcome! \n Here are the commands to use this weather bot \n 1. /subscribe - receive daily weather updates at 8am \n 2. /unsubscribe - stop receiving our useful updates \n 3. /weather - for current weather updates of your city \n 4. /update - to set or update your current city for getting daily updates of that city';
+    const welcomeMessage = 'Welcome! \n Here are the commands to use this weather bot \n 1. /subscribe - receive daily weather updates at 8 am \n 2. /unsubscribe - stop receiving updates \n 3. /weather - for current weather updates of your city \n 4. /update - set or update your city for daily updates';
     bot.sendMessage(chatId, welcomeMessage);
 });
-bot.onText(/\/subscribe/, (msg) => {
+
+// Handle /subscribe command
+bot.onText(/\/subscribe/, async (msg) => {
     const chatId = msg.chat.id;
-    // add user
-    const message = "Here we go with daily updates sharp at 8am, \n please set your city for updates using */updateCity _cityName_* command"
-    bot.sendMessage(chatId, message, {parse_mode: 'MarkdownV2'});
+    const firstName = msg.chat.first_name;
+    const userName = msg.chat.username;
+
+    if (!await isSubscribed(chatId)) {
+        createUser(chatId, firstName, userName);
+        const message = "Here we go with daily updates sharp at 8 am, \n please set your city for updates using */updateCity _cityName_* command";
+        bot.sendMessage(chatId, message, { parse_mode: 'MarkdownV2' });
+    } else {
+        bot.sendMessage(chatId, "You have already subscribed");
+    }
 });
+
+async function removeUser(chatId) {
+    if (await isSubscribed(chatId)) {
+        await UserModel.deleteOne({ chatId });
+        bot.sendMessage(chatId, "Sorry to see you go! \n You have successfully unsubscribed from our service");
+    }
+    else
+        bot.sendMessage(chatId, "Please subscribe first");
+}
+
+// Handle /unsubscribe command
 bot.onText(/\/unsubscribe/, (msg) => {
     const chatId = msg.chat.id;
-    // remove user
-    bot.sendMessage(chatId, "Sorry to see you go! \n you have successfully unsubscribed to our service");
+    removeUser(chatId);
 });
+
+// Handle /update command
 bot.onText(/\/update/, (msg) => {
     const chatId = msg.chat.id;
     const city = msg.text.substring(8);
 
-    if(city == ""){
-        bot.sendMessage(chatId, "please try again with city name");
-    }
-    else{
-        // update city of user    
-        getUpdates(chatId);
+    if (!city) {
+        bot.sendMessage(chatId, "Please try again with a city name");
+    } else {
+        updateUserCity(chatId, city);
     }
 });
-bot.onText(/\/weather/, (msg) => {
-    const chatId = msg.chat.id;   
-    getUpdates(chatId);
+
+// Handle /weather command
+bot.onText(/\/weather/, async (msg) => {
+    const chatId = msg.chat.id;
+    if (await isSubscribed(chatId)) {
+        getWeatherUpdates(chatId);
+    } else {
+        bot.sendMessage(chatId, "Please subscribe first");
+    }
 });
-
-
-
-
-
-
-
-
-
-// bot.on("message", async (msg)=>{
-//     console.log(msg);
-//     let chatId = msg.chat.id;
-//     let userInput = msg.text;
-
-//     let params = {
-//     access_key: weather_Token,
-//     query: userInput
-//     }
-
-//     axios.get('http://api.weatherstack.com/current', {params})
-//     .then(response => {
-//         const apiResponse = response.data;
-//         const city = apiResponse.location.name + ", " + apiResponse.location.country;
-//         const temperature = apiResponse.current.temperature;
-//         const humidity = apiResponse.current.humidity;
-//         const pressure = apiResponse.current.pressure;
-//         const visibility = apiResponse.current.visibility;
-//         const weather_descriptions = apiResponse.current.weather_descriptions;
-
-//         const returnMessage = `Weather Report:
-//         city name: ${city}
-//         weather_descriptions: ${weather_descriptions}
-//         temperature: ${temperature}°C
-//         humidity: ${humidity}%
-//         pressure: ${pressure}hPa
-//         visibility: ${visibility}km`;
-
-//         bot.sendMessage(chatId, returnMessage);
-//     }).catch(error => {
-//         bot.sendMessage(chatId, "No such city exists");
-//         console.log(error);
-//     });   
-// });
-
