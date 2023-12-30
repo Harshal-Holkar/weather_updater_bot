@@ -1,8 +1,15 @@
-const TelegramBot = require("node-telegram-bot-api");
-const axios = require("axios");
+const express = require('express');
+const bodyParser = require('body-parser');
+const TelegramBot = require('node-telegram-bot-api');
+const axios = require('axios');
 const schedule = require('node-schedule');
 const mongoose = require('mongoose');
 require('dotenv').config();
+
+const app = express();
+const port = process.env.PORT || 3000;
+
+app.use(bodyParser.urlencoded({ extended: true }));
 
 const TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const weather_Token = process.env.WEATHER_API_TOKEN;
@@ -12,15 +19,7 @@ mongoose.connect(process.env.MONGODB_CONNECTION_STRING);
 const bot = new TelegramBot(TOKEN, { polling: true });
 const UserModel = require('./models/userModel');
 
-async function createUser(chatId, firstName, userName) {
-    await UserModel.create({
-        chatId,
-        userName,
-        firstName,
-    });
-}
-
-// Schedule a job to run every 8 am
+// Schedule a job to run every day at 8 am
 const dailyJob = schedule.scheduleJob('0 8 * * *', () => {
     console.log('Job executed daily at 8 am', new Date());
     sendWeatherUpdatesToAll();
@@ -30,14 +29,13 @@ async function sendWeatherUpdatesToAll() {
     const users = await UserModel.find();
 
     users.forEach(async (user) => {
-        const chatId = user.chatId; // if users is blocked it will remind him/her of same
+        const chatId = user.chatId;
         if (await isSubscribed(chatId)) {
             getWeatherUpdates(chatId);
         }
     });
 }
 
-// Check if user is blocked by admin
 async function isBlocked(chatId) {
     const user = await UserModel.findOne({ chatId });
     if (user && user.isBlocked) {
@@ -47,7 +45,6 @@ async function isBlocked(chatId) {
     return false;
 }
 
-// Check if user is subscribed
 async function isSubscribed(chatId) {
     if (await isBlocked(chatId)) {
         return false;
@@ -57,10 +54,9 @@ async function isSubscribed(chatId) {
     return user !== null;
 }
 
-// Get weather updates
 async function getWeatherUpdates(chatId) {
     const user = await UserModel.findOne({ chatId });
-    const city = user.city; // Retrieve from the database using chatId
+    const city = user.city;
     const params = {
         access_key: weather_Token,
         query: city,
@@ -127,9 +123,9 @@ async function removeUser(chatId) {
     if (await isSubscribed(chatId)) {
         await UserModel.deleteOne({ chatId });
         bot.sendMessage(chatId, "Sorry to see you go! \n You have successfully unsubscribed from our service");
-    }
-    else
+    } else {
         bot.sendMessage(chatId, "Please subscribe first");
+    }
 }
 
 // Handle /unsubscribe command
@@ -158,4 +154,14 @@ bot.onText(/\/weather/, async (msg) => {
     } else {
         bot.sendMessage(chatId, "Please subscribe first");
     }
+});
+
+// Express routes
+app.get('/', (req, res) => {
+    res.send('Hello, please use given this telegram bot for daily weather updates: @daily_weather_updater_bot');
+});
+
+// Start Express server
+app.listen(port, () => {
+    console.log(`Express server listening on port ${port}`);
 });
